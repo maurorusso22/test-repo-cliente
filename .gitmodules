@@ -1,0 +1,3 @@
+[submodule "docs-team"]
+	path = docs-team
+	url = https://github.com/maurorusso22/test-repo-cliente-docs.git
