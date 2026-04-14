@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Fullstack K8s Example")
 
