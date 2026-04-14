@@ -1,0 +1,261 @@
+name: "CI Pipeline - Fullstack + Kubernetes"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  APP_NAME: "fullstack-k8s-example"
+  DOCKER_IMAGE_NAME: "fullstack-k8s-example"
+  HELM_CHART_PATH: "./helm-chart"
+
+jobs:
+  # --- Code Quality ---
+
+  backend-quality:
+    name: "Backend Quality & Testing"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Format check (black)
+        id: lint-black
+        run: uv run black --check .
+
+      - name: Lint (flake8)
+        if: steps.lint-black.outcome == 'success'
+        id: lint-flake8
+        run: uv run flake8 src/ tests/
+
+      - name: Import sorting (isort)
+        if: steps.lint-flake8.outcome == 'success'
+        id: lint-isort
+        run: uv run isort --check-only .
+
+      - name: Type check (mypy)
+        if: steps.lint-isort.outcome == 'success'
+        id: typecheck
+        run: uv run mypy src/
+
+      - name: Run tests with coverage
+        if: steps.typecheck.outcome == 'success'
+        run: uv run pytest --cov=src --cov-report=xml --cov-report=term --cov-fail-under=80
+
+  frontend-quality:
+    name: "Frontend Quality & Testing"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format check (Prettier)
+        id: prettier-check
+        run: npx prettier --check .
+
+      - name: Lint (ESLint)
+        if: steps.prettier-check.outcome == 'success'
+        id: eslint-check
+        run: npx eslint . --max-warnings 0
+
+      - name: Type check (TypeScript)
+        if: steps.eslint-check.outcome == 'success'
+        id: typecheck
+        run: npx tsc --noEmit
+
+      - name: Run tests with coverage
+        if: steps.typecheck.outcome == 'success'
+        run: npx vitest run --coverage
+
+  # --- Infrastructure Validation ---
+
+  helm-lint:
+    name: "Helm Chart Validation"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: "latest"
+
+      - name: Lint Helm chart
+        run: helm lint ${{ env.HELM_CHART_PATH }}
+
+      - name: Validate Helm templates
+        run: helm template ${{ env.APP_NAME }} ${{ env.HELM_CHART_PATH }} --debug --dry-run
+
+  dockerfile-security:
+    name: "Dockerfile Security"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+  config-security:
+    name: "Config Security"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: "config"
+          scan-ref: ${{ env.HELM_CHART_PATH }}
+          format: "sarif"
+          output: "trivy-config-results.sarif"
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-config-results.sarif"
+        continue-on-error: true
+
+  # --- Build ---
+
+  build:
+    name: "Docker Build"
+    runs-on: ubuntu-latest
+    needs: [backend-quality, frontend-quality, helm-lint, dockerfile-security]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Compress image
+        run: gzip /tmp/image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar.gz
+          retention-days: 1
+
+  # --- Security & Testing Post-Build ---
+
+  image-security:
+    name: "Image Security & Container Testing"
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        run: |
+          gunzip /tmp/image.tar.gz
+          docker load --input /tmp/image.tar
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: "${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}"
+          format: "sarif"
+          output: "trivy-image-results.sarif"
+          severity: "HIGH,CRITICAL"
+
+      - name: Upload Trivy image results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-image-results.sarif"
+        continue-on-error: true
+
+      - name: Container integration test
+        run: |
+          docker run -d --name app-test -p 8080:8000 ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          sleep 10
+          curl -f http://localhost:8080/health || exit 1
+          docker stop app-test
+          docker rm app-test
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: |
+          docker logs app-test || true
+          docker stop app-test || true
+          docker rm app-test || true
+
+  # --- Registry Push ---
+
+  push:
+    name: "Registry Push"
+    runs-on: ubuntu-latest
+    needs: [image-security, config-security]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        run: |
+          gunzip /tmp/image.tar.gz
+          docker load --input /tmp/image.tar
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Tag and push
+        run: |
+          docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          docker tag ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
