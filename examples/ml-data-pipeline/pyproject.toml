@@ -1,0 +1,33 @@
+[project]
+name = "ml-data-pipeline-example"
+version = "0.1.0"
+description = "Esempio mini-progetto per pipeline ML/Data"
+requires-python = ">=3.12"
+dependencies = [
+    "scikit-learn>=1.6.0",
+    "numpy>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=25.1.0",
+    "flake8>=7.1.0",
+    "isort>=5.13.0",
+    "mypy>=1.14.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+    "nbqa>=1.9.0",
+    "nbstripout>=0.8.0",
+    "jupyter>=1.1.0",
+    "nbconvert>=7.16.0",
+    "ipykernel>=6.29.0",
+]
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+ignore_missing_imports = true
