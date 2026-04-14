@@ -1,6 +1,9 @@
 """Validazione del modello: verifica che produca output coerenti."""
 
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.predict import predict, train_model
 
