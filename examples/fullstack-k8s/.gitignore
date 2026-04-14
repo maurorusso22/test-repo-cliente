@@ -1,0 +1,15 @@
+# Backend
+backend/.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+htmlcov/
+coverage.xml
+*.egg-info/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+*.tsbuildinfo
